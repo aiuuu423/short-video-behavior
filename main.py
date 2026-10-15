@@ -21,13 +21,13 @@ warnings.filterwarnings("ignore", category=Warning, module="urllib3")
 
 import config
 from config import POLL_INTERVAL
-from tiktok_parser import parse_tiktok_link
+from tiktok_parser import parse_video_link
 
 DEFAULT_FEISHU_APP_ID = os.getenv("DEFAULT_FEISHU_APP_ID", "")
 DEFAULT_FEISHU_APP_SECRET = os.getenv("DEFAULT_FEISHU_APP_SECRET", "")
 CAPTURE_LOG_FILE = os.path.join("data", "captured_links.jsonl")
-WRITE_WORKER_COUNT = 1
-WRITE_MAX_RETRIES = 5
+WRITE_WORKER_COUNT = 2
+WRITE_MAX_RETRIES = 3
 VIOLATION_MARKERS = {"违规", "0", "TT_VIOLATION_NEXT", "TT违规"}
 VIOLATION_MARK_WINDOW_SECONDS = 10
 HTTP_HOST = "0.0.0.0"
@@ -58,10 +58,12 @@ def is_violation_marker(text: str) -> bool:
 
 
 def notify_beep(times: int = 1):
-    for _ in range(times):
-        sys.stdout.write("\a")
-        sys.stdout.flush()
-        time.sleep(0.05)
+    def _beep():
+        for _ in range(times):
+            sys.stdout.write("\a")
+            sys.stdout.flush()
+            time.sleep(0.05)
+    threading.Thread(target=_beep, daemon=True).start()
 
 
 def get_lan_ip() -> str:
@@ -99,8 +101,8 @@ class ClipboardMonitor:
         self._last_text = pyperclip.paste()
         self._enable_single_key_mode()
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Agent 已启动，正在监听剪贴板。")
-        print(f"当前配置：采集任务={self.task_name}，TikTok 来源标签={self.source_label}，飞书写入目标={self.target_name}")
-        print("推荐模式：iPhone 快捷指令直传链接到 Mac；剪贴板监听仅作为备用；按 q 退出。")
+        print(f"当前配置：采集任务={self.task_name}，来源标签={self.source_label}，飞书写入目标={self.target_name}")
+        print("最终模式：不违规只复制链接；违规复制链接后点一次悬浮球；按 q 退出。")
         try:
             while self._running:
                 try:
@@ -112,7 +114,7 @@ class ClipboardMonitor:
                     self._clear_expired_pending()
                 except Exception as e:
                     print(f"剪贴板读取错误: {e}")
-                time.sleep(0.01)
+                time.sleep(0.2)
         finally:
             self._disable_single_key_mode()
 
@@ -165,15 +167,15 @@ class ClipboardMonitor:
             self._mark_pending_violation()
             return
 
-        parsed = parse_tiktok_link(text)
+        parsed = parse_video_link(text)
         if not parsed:
             return
         self._enqueue_parsed_link(parsed, is_violation=False, capture_source="clipboard")
 
     def submit_external_link(self, text: str, is_violation: bool, capture_source: str = "http") -> dict:
-        parsed = parse_tiktok_link(text)
+        parsed = parse_video_link(text)
         if not parsed:
-            return {"ok": False, "error": "未识别到 TikTok 链接"}
+            return {"ok": False, "error": "未识别到受支持平台的视频链接"}
         seq = self._enqueue_parsed_link(parsed, is_violation=is_violation, capture_source=capture_source)
         return {"ok": True, "seq": seq, "is_violation": is_violation}
 
@@ -215,7 +217,8 @@ class ClipboardMonitor:
             self._items[seq] = item
             self._pending_violation = item
             self._recent_urls[parsed["normalized_url"]] = {"seq": seq, "time": now}
-        print(f"\n#{seq} [{datetime.now().strftime('%H:%M:%S')}] 检测到 TikTok 链接:")
+        platform = parsed.get("platform") or "未知平台"
+        print(f"\n#{seq} [{datetime.now().strftime('%H:%M:%S')}] 检测到视频链接（{platform}）:")
         print(f"#{seq} 视频ID: {parsed['video_id'] or '未知'}")
         print(f"#{seq} 链接: {parsed['normalized_url']}")
         print(f"#{seq} 判定: {'违规' if is_violation else '不违规'}")
@@ -225,6 +228,7 @@ class ClipboardMonitor:
             "captured_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "url": parsed["normalized_url"],
             "video_id": parsed["video_id"],
+            "platform": parsed.get("platform"),
             "is_violation": is_violation,
             "capture_source": capture_source,
             "task_name": self.task_name,
@@ -268,7 +272,7 @@ class ClipboardMonitor:
                     if attempt == WRITE_MAX_RETRIES:
                         break
                     print(f"#{seq} 写入失败，自动重试 {attempt}/{WRITE_MAX_RETRIES}: {result.get('error')}")
-                    time.sleep(min(2 ** attempt, 10))
+                    time.sleep(min(attempt, 2))
                 if result.get("action") in ("appended", "updated"):
                     record_id = result.get("record_id", "")
                     update_after_write = False
@@ -308,7 +312,7 @@ class ClipboardMonitor:
             pending = self._pending_violation
             if not pending or time.time() > pending["deadline"]:
                 self._pending_violation = None
-                print("\n⚠️ 没有可标记的最近链接：请先复制 TikTok 链接，再长按悬浮球。")
+                print("\n⚠️ 没有可标记的最近链接：请先复制视频链接，再点一次悬浮球。")
                 return
             if pending.get("violation_requested"):
                 print(f"\n#{pending.get('seq')} 已经标记为违规，无需重复操作。")
@@ -378,13 +382,16 @@ class ClipboardMonitor:
     def start(self):
         self._running = True
         self._worker_threads = [t for t in self._worker_threads if t.is_alive()]
+        if not self._start_http_server():
+            self._running = False
+            return False
         while len(self._worker_threads) < WRITE_WORKER_COUNT:
             worker = threading.Thread(target=self._record_worker_loop, daemon=True)
             worker.start()
             self._worker_threads.append(worker)
-        self._start_http_server()
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
+        return True
 
     def stop(self):
         self._running = False
@@ -397,7 +404,7 @@ class ClipboardMonitor:
 
     def _start_http_server(self):
         if self._http_server:
-            return
+            return True
         monitor = self
 
         class RecordHandler(BaseHTTPRequestHandler):
@@ -446,19 +453,40 @@ class ClipboardMonitor:
             self._http_server = ThreadingHTTPServer((HTTP_HOST, HTTP_PORT), RecordHandler)
         except OSError as e:
             print(f"⚠️ HTTP 直传服务启动失败：{e}")
-            print("仍会继续使用剪贴板监听备用模式。")
-            return
+            print("检测到可能已有一个 Agent 正在运行。为避免重复录入，本次启动已停止。")
+            return False
         self._http_thread = threading.Thread(target=self._http_server.serve_forever, daemon=True)
         self._http_thread.start()
         lan_ip = get_lan_ip()
         print(f"HTTP 直传已开启：http://{lan_ip}:{HTTP_PORT}/record")
         print("iPhone 快捷指令可直接请求该地址，绕过 Apple 跨设备剪贴板。")
+        return True
+
+
+def startup_flush_async(manager):
+    """启动后在后台补写历史失败记录，不阻塞剪贴板监听。"""
+    def _run():
+        time.sleep(1)
+        try:
+            result = manager.flush_pending()
+        except Exception as e:
+            print(f"\n📦 历史失败记录补写异常: {e}")
+            return
+        if result.get("retried"):
+            print(
+                f"\n📦 历史失败记录补写完成：成功 {result['succeeded']} 条，"
+                f"已存在跳过 {result['skipped_existing']} 条，仍失败 {result['remaining']} 条。"
+            )
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def run_monitor(monitor: ClipboardMonitor):
-    monitor.start()
-    print("【推荐】极速模式：iPhone 复制链接后，用快捷指令提交到 Mac。")
-    print("【备用】只复制链接仍会走 Apple 跨设备剪贴板监听，但可能慢或漏。按 q 退出。")
+    if not monitor.start():
+        return
+    startup_flush_async(monitor.manager)
+    print("【不违规】只复制视频链接（TikTok/YouTube/Instagram/Facebook），自动按不违规写入。")
+    print("【违规】先复制视频链接，再点一次悬浮球，自动按违规写入/修正。按 q 退出。")
     while monitor._running:
         time.sleep(0.2)
     if not monitor._record_queue.empty():

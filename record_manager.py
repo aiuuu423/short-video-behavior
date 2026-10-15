@@ -182,21 +182,76 @@ class RecordManager:
             self._save_failed(fields, str(e), "search")
             return {"action": "failed_cached", "error": str(e), "failed_count": self.failed_count()}
 
+    @staticmethod
+    def _extract_url_text(val) -> str:
+        if isinstance(val, dict):
+            return str(val.get("link") or val.get("text") or "").strip()
+        if isinstance(val, list):
+            for part in val:
+                if isinstance(part, dict):
+                    text = str(part.get("link") or part.get("text") or "").strip()
+                    if text:
+                        return text
+            return str(part).strip() if val else ""
+        return str(val or "").strip()
+
+    def _existing_dedupe_keys(self) -> set:
+        """汇总飞书表与本地已处理记录中的去重 Key/链接，供失败重放去重。"""
+        existing = set()
+        try:
+            for rec in self.bitable.list_all_records():
+                fields = rec.get("fields", {})
+                key = fields.get(FIELD_DEDUPE_KEY)
+                if key:
+                    existing.add(str(key).strip())
+                url_text = self._extract_url_text(fields.get(FIELD_URL))
+                if url_text:
+                    existing.add(url_text)
+        except Exception:
+            pass
+        for item in self._load_json_list(PROCESSED_LINKS_FILE):
+            key = item.get("dedupe_key")
+            if key:
+                existing.add(str(key).strip())
+        return existing
+
     def flush_pending(self):
         failed = self._load_json_list(FAILED_RECORDS_FILE)
         if not failed:
-            return {"retried": 0, "succeeded": 0, "remaining": 0}
+            return {"retried": 0, "succeeded": 0, "remaining": 0, "skipped_existing": 0}
 
+        existing_keys = self._existing_dedupe_keys()
         remaining = []
         succeeded = 0
+        skipped = 0
         for item in failed:
             fields = item.get("fields", {})
+            url_text = self._extract_url_text(fields.get(FIELD_URL))
+            key = str(fields.get(FIELD_DEDUPE_KEY) or url_text).strip()
+            # 重放前再次检查，避免与监听线程刚写入的同链接记录重复
+            if key and (key in existing_keys or self._find_processed(key)):
+                skipped += 1
+                continue
             try:
-                self.bitable.create_record(fields)
+                record = self.bitable.create_record(fields)
+                record_id = record.get("record_id", "") if isinstance(record, dict) else ""
+                existing_keys.add(key)
+                self._mark_processed(
+                    key,
+                    url_text,
+                    str(fields.get(FIELD_TASK, "")),
+                    str(fields.get(FIELD_SOURCE_LABEL, "")),
+                    record_id,
+                )
                 succeeded += 1
             except Exception as e:
                 item["retry_count"] = int(item.get("retry_count", 0)) + 1
                 item["error_message"] = str(e)
                 remaining.append(item)
         self._save_json_list(FAILED_RECORDS_FILE, remaining)
-        return {"retried": len(failed), "succeeded": succeeded, "remaining": len(remaining)}
+        return {
+            "retried": len(failed),
+            "succeeded": succeeded,
+            "remaining": len(remaining),
+            "skipped_existing": skipped,
+        }

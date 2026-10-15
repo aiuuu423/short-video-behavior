@@ -83,6 +83,34 @@ TIKTOK_DOMAINS = [
     "www.tiktok.com",
 ]
 
+# 支持识别的各平台视频链接域名
+PLATFORM_DOMAINS = {
+    "tiktok": TIKTOK_DOMAINS,
+    "youtube": [
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "youtu.be",
+        "youtube-nocookie.com",
+    ],
+    "instagram": [
+        "instagram.com",
+        "www.instagram.com",
+        "instagr.am",
+    ],
+    "facebook": [
+        "facebook.com",
+        "www.facebook.com",
+        "m.facebook.com",
+        "fb.watch",
+        "fb.com",
+    ],
+}
+
+# 「链接」列写入方式：text=按文本写入（列类型需为文本/单行文本）；
+# url=按超链接对象写入（列类型为超链接）。auto=按飞书实际列类型自动选择。
+LINK_WRITE_MODE = os.getenv("LINK_WRITE_MODE", "auto")
+
 LOCAL_CACHE_FILE = "cache.json"
 
 FIELD_START_TIME = "起始时间"

@@ -83,41 +83,33 @@ HTTP 直传已开启：http://192.168.1.23:8765/record
 ```
 请把你终端里显示的 `http://你的Mac局域网IP:8765/record` 记下来，下面创建快捷指令要用。
 
-需要创建两个快捷指令：
-1. `RecordNoViolation`：提交不违规。
-2. `RecordViolation`：提交违规。
+只需要创建一个快捷指令：
+1. `RecordViolation`：提交违规。
 
-英文 iPhone 界面创建 `RecordNoViolation`：
+英文 iPhone 界面创建 `RecordViolation`：
 1. Open **Shortcuts**。
 2. Tap **+**。
-3. Rename shortcut to `RecordNoViolation`。
+3. Rename shortcut to `RecordViolation`。
 4. Add action **Get Clipboard**。
 5. Add action **URL Encode**，把 `Clipboard` 做 URL Encode。
 6. Add action **URL**，内容填：
    ```text
-   http://你的Mac局域网IP:8765/record?violation=0&url=URL Encoded Text
+   http://你的Mac局域网IP:8765/record?violation=1&url=URL Encoded Text
    ```
    注意：最后的 `URL Encoded Text` 要选上一步生成的变量，不是手打普通文字。
 7. Add action **Get Contents of URL**。
 8. Tap **Done**。
 
-英文 iPhone 界面创建 `RecordViolation`：
-1. 复制一份 `RecordNoViolation` 快捷指令。
-2. Rename shortcut to `RecordViolation`。
-3. 把 URL 里的 `violation=0` 改成 `violation=1`。
-4. Tap **Done**。
-
 绑定到悬浮球：
 1. 打开 iPhone **Settings -> Accessibility -> Touch -> AssistiveTouch**。
 2. 打开 **AssistiveTouch**。
-3. 在 **Custom Actions** 里，把 **Single-Tap** 绑定到 `RecordNoViolation`。
-4. 把 **Long Press** 绑定到 `RecordViolation`。
-5. 之后你只需要复制链接后操作悬浮球，不再依赖跨设备剪贴板同步。
+3. 在 **Custom Actions** 里，把 **Long Press** 绑定到 `RecordViolation`。
+4. 只保留 **Long Press** 这个快捷指令绑定；不违规时不点悬浮球，只复制链接。
 
 ### 第四步：开始刷视频！
 1. 启动后会自动进入监听状态，看到 `Agent 已启动，正在监听剪贴板` 即可开始刷。
-2. 如果视频**不违规**：在 TikTok 点 **Share -> Copy link**，然后**点一下悬浮球**，Agent 会写入 `是否违规=否`。
-3. 如果视频**违规**：在 TikTok 点 **Share -> Copy link**，然后**长按悬浮球**，Agent 会写入 `是否违规=是`。
+2. 如果视频**不违规**：只在 TikTok 点 **Share -> Copy link**，Agent 会通过剪贴板监听写入 `是否违规=否`。
+3. 如果视频**违规**：在 TikTok 点 **Share -> Copy link**，然后**长按悬浮球**，Agent 会写入/修正为 `是否违规=是`。
 4. 终端会显示编号和判定结果，例如：
    ```text
    #12 判定: 违规
@@ -126,18 +118,18 @@ HTTP 直传已开启：http://192.168.1.23:8765/record
 5. 你不需要在电脑终端按任何键；如果要退出监听，回到终端按 `q`。
 
 **💡 终极操作提示：**
-极速模式的连招是：**TikTok Share -> Copy link** 👉 **不违规点一下悬浮球 / 违规长按悬浮球**。
-这个模式是 iPhone 直接通过 Wi-Fi 发给 Mac，不需要等 Apple 跨设备剪贴板。
+最终连招是：**不违规只复制链接；违规复制链接后长按悬浮球**。
+不违规依赖 Apple 跨设备剪贴板监听；违规则通过悬浮球快捷指令直传到 Mac，准确度更高。
 
 ---
 
 ## 💡 常见问题 Q&A
 
-**Q: 为什么我在手机上复制了链接，Mac 终端没反应？**
-A: 如果你只复制链接、不点悬浮球，仍然依赖苹果“通用剪贴板”，它可能会慢或漏。推荐使用极速模式：复制链接后点一下悬浮球或长按悬浮球，让 iPhone 直接发给 Mac。
+**Q: 为什么不违规只复制链接时，Mac 终端有时没反应？**
+A: 不违规只复制链接依赖 Apple Universal Clipboard，同步偶尔会慢或漏。请保持 Mac 和 iPhone 同一 Wi-Fi、蓝牙开启、Handoff 开启。当前最终流程只保留违规长按悬浮球，不再配置不违规快捷指令，避免重复录入。
 
-**Q: 为什么极速模式不再推荐“只复制链接”？**
-A: 只复制链接必须等 Apple Universal Clipboard 同步到 Mac，速度和准确度不可控。极速模式让 iPhone 快捷指令直接请求 Mac 本地服务，链接和违规状态一次性绑定，最适合高频采集。
+**Q: 为什么违规要复制链接后长按悬浮球？**
+A: 违规长按悬浮球会让 iPhone 直接把剪贴板里的 TikTok 链接通过 Wi-Fi 发给 Mac，并带上 `violation=1`，所以比单纯等跨设备剪贴板更稳。
 
 **Q: 报错提示“写入字段 xxx 失败”怎么办？**
 A: 请检查你的飞书多维表格的表头名字，是否和脚本预期的名字完全一致。如果不一致，请在表格中修改列名。
