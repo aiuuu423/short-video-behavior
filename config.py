@@ -71,6 +71,12 @@ FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
 
 BITABLE_APP_TOKEN = os.getenv("BITABLE_APP_TOKEN", "")
 BITABLE_TABLE_ID = os.getenv("BITABLE_TABLE_ID", "")
+FEISHU_TARGET_TYPE = os.getenv("FEISHU_TARGET_TYPE", "bitable").lower()
+SHEET_URL = os.getenv("SHEET_URL", "")
+SHEET_ID = os.getenv("SHEET_ID", "")
+SHEET_NAME = os.getenv("SHEET_NAME", "")
+SHEET_HEADER_RANGE = os.getenv("SHEET_HEADER_RANGE", "A1:Z1")
+LARK_CLI_AS = os.getenv("LARK_CLI_AS", "user")
 
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "1.0"))
 IDLE_THRESHOLD_MINUTES = int(os.getenv("IDLE_THRESHOLD_MINUTES", "10"))
@@ -115,9 +121,11 @@ LOCAL_CACHE_FILE = "cache.json"
 
 FIELD_START_TIME = "起始时间"
 FIELD_BEHAVIOR = "行为"
-FIELD_KEYWORD = "搜索词"
+FIELD_KEYWORD = os.getenv("FIELD_KEYWORD", "搜索词")
 FIELD_URL = "链接"
 FIELD_QUALIFIED = os.getenv("FIELD_QUALIFIED", "是否违规")
+FIELD_POLICY = os.getenv("FIELD_POLICY", "policy")
+FIELD_INTEREST_PROFILE = os.getenv("FIELD_INTEREST_PROFILE", "兴趣画像")
 FIELD_FYF_DENSITY = "FYF密度"
 FIELD_TASK = os.getenv("FIELD_TASK", "采集任务")
 FIELD_SOURCE_LABEL = os.getenv("FIELD_SOURCE_LABEL", "TikTok 来源标签")

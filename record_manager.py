@@ -14,6 +14,8 @@ from config import (
     FIELD_KEYWORD,
     FIELD_URL,
     FIELD_QUALIFIED,
+    FIELD_POLICY,
+    FIELD_INTEREST_PROFILE,
     FIELD_FYF_DENSITY,
     FIELD_TASK,
     FIELD_SOURCE_LABEL,
@@ -118,6 +120,8 @@ class RecordManager:
         task_name: str = "",
         source_label: str = "",
         behavior_tags: Optional[List[str]] = None,
+        policy: str = "",
+        interest_profile: str = "",
         cache_on_fail: bool = True,
     ) -> dict:
         behavior_tags = behavior_tags or ["复制链接"]
@@ -136,6 +140,10 @@ class RecordManager:
             FIELD_WRITE_STATUS: "成功",
             FIELD_DEDUPE_KEY: dedupe_key,
         }
+        if policy:
+            fields[FIELD_POLICY] = policy
+        if interest_profile:
+            fields[FIELD_INTEREST_PROFILE] = interest_profile
         if self._is_new_session():
             fields[FIELD_START_TIME] = self._now_timestamp_ms()
         try:
@@ -143,11 +151,43 @@ class RecordManager:
             record_id = record.get("record_id", "")
             self._mark_processed(dedupe_key, video_url, task_name, source_label, record_id)
             self._update_activity()
-            return {"action": "appended", "url": video_url, "record_id": record_id, "is_violation": is_violation}
+            return {
+                "action": "appended",
+                "url": video_url,
+                "record_id": record_id,
+                "is_violation": is_violation,
+                "policy": policy,
+                "interest_profile": interest_profile,
+            }
         except Exception as e:
             if cache_on_fail:
                 self._save_failed(fields, str(e), "feed")
             return {"action": "failed_cached", "error": str(e), "failed_count": self.failed_count()}
+
+    def update_record_labels(
+        self,
+        record_id: str,
+        policy: str = "",
+        interest_profile: str = "",
+        is_violation: Optional[bool] = None,
+    ) -> dict:
+        if not record_id:
+            return {"action": "failed", "error": "缺少 record_id，无法更新记录"}
+        fields = {}
+        if is_violation is not None:
+            fields[FIELD_QUALIFIED] = "是" if is_violation else "否"
+        if policy:
+            fields[FIELD_POLICY] = policy
+        if interest_profile:
+            fields[FIELD_INTEREST_PROFILE] = interest_profile
+        if not fields:
+            return {"action": "skipped", "reason": "empty_update"}
+        try:
+            self.bitable.update_record(record_id, fields)
+            self._update_activity()
+            return {"action": "updated", "record_id": record_id, "fields": fields}
+        except Exception as e:
+            return {"action": "failed", "error": str(e)}
 
     def mark_record_violation(self, record_id: str) -> dict:
         if not record_id:

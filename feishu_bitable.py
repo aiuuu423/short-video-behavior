@@ -11,6 +11,8 @@ FIELD_CACHE_TTL = 600
 
 def fields_to_retry(fields: Optional[Dict[str, Any]] = None) -> List[str]:
     optional = [
+        config.FIELD_POLICY,
+        config.FIELD_INTEREST_PROFILE,
         config.FIELD_TASK,
         config.FIELD_SOURCE_LABEL,
         config.FIELD_BEHAVIOR_TAGS,

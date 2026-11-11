@@ -33,6 +33,37 @@ VIOLATION_MARK_WINDOW_SECONDS = 10
 HTTP_HOST = "0.0.0.0"
 HTTP_PORT = 8765
 RECENT_DUPLICATE_WINDOW_SECONDS = 20
+METADATA_MARK_WINDOW_SECONDS = 60
+POLICY_HOTKEYS = {
+    "1": "EDF",
+    "2": "NSA",
+    "3": "SSH",
+    "4": "HHB",
+}
+INTEREST_HOTKEYS = {
+    "f": "符合",
+    "n": "不符合",
+}
+POLICY_ALIASES = {
+    "edf": "EDF",
+    "nsa": "NSA",
+    "ssh": "SSH",
+    "hhb": "HHB",
+}
+INTEREST_ALIASES = {
+    "1": "符合",
+    "yes": "符合",
+    "y": "符合",
+    "true": "符合",
+    "fit": "符合",
+    "符合": "符合",
+    "0": "不符合",
+    "no": "不符合",
+    "n": "不符合",
+    "false": "不符合",
+    "unfit": "不符合",
+    "不符合": "不符合",
+}
 
 
 def parse_bitable_url(value: str) -> Tuple[str, str]:
@@ -64,6 +95,20 @@ def notify_beep(times: int = 1):
             sys.stdout.flush()
             time.sleep(0.05)
     threading.Thread(target=_beep, daemon=True).start()
+
+
+def normalize_policy(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return POLICY_ALIASES.get(raw.lower(), raw.upper())
+
+
+def normalize_interest_profile(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return INTEREST_ALIASES.get(raw.lower(), raw)
 
 
 def get_lan_ip() -> str:
@@ -103,6 +148,7 @@ class ClipboardMonitor:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Agent 已启动，正在监听剪贴板。")
         print(f"当前配置：采集任务={self.task_name}，来源标签={self.source_label}，飞书写入目标={self.target_name}")
         print("最终模式：不违规只复制链接；违规复制链接后点一次悬浮球；按 q 退出。")
+        print("快捷标注：v/0=违规，1=EDF，2=NSA，3=SSH，4=HHB，f=兴趣画像符合，n=兴趣画像不符合。")
         try:
             while self._running:
                 try:
@@ -153,8 +199,17 @@ class ClipboardMonitor:
             print("\n正在退出监听。")
             self.stop()
             return
-        if key in ("0", "9", "s"):
-            print("\n提示：当前是手机标记模式，不需要在电脑按键标注；按 q 可退出监听。")
+        if key in ("v", "0"):
+            self._mark_pending_violation()
+            return
+        if key in POLICY_HOTKEYS:
+            self._mark_pending_metadata(policy=POLICY_HOTKEYS[key])
+            return
+        if key in INTEREST_HOTKEYS:
+            self._mark_pending_metadata(interest_profile=INTEREST_HOTKEYS[key])
+            return
+        if key in ("9", "s"):
+            print("\n快捷键：v/0=违规，1=EDF，2=NSA，3=SSH，4=HHB，f=兴趣画像符合，n=兴趣画像不符合，q=退出。")
 
     def _clear_expired_pending(self):
         with self._state_lock:
@@ -172,16 +227,43 @@ class ClipboardMonitor:
             return
         self._enqueue_parsed_link(parsed, is_violation=False, capture_source="clipboard")
 
-    def submit_external_link(self, text: str, is_violation: bool, capture_source: str = "http") -> dict:
+    def submit_external_link(
+        self,
+        text: str,
+        is_violation: bool,
+        capture_source: str = "http",
+        policy: str = "",
+        interest_profile: str = "",
+    ) -> dict:
         parsed = parse_video_link(text)
         if not parsed:
             return {"ok": False, "error": "未识别到受支持平台的视频链接"}
-        seq = self._enqueue_parsed_link(parsed, is_violation=is_violation, capture_source=capture_source)
-        return {"ok": True, "seq": seq, "is_violation": is_violation}
+        seq = self._enqueue_parsed_link(
+            parsed,
+            is_violation=is_violation,
+            capture_source=capture_source,
+            policy=policy,
+            interest_profile=interest_profile,
+        )
+        return {
+            "ok": True,
+            "seq": seq,
+            "is_violation": is_violation,
+            "policy": policy,
+            "interest_profile": interest_profile,
+        }
 
-    def _enqueue_parsed_link(self, parsed: dict, is_violation: bool, capture_source: str) -> int:
+    def _enqueue_parsed_link(
+        self,
+        parsed: dict,
+        is_violation: bool,
+        capture_source: str,
+        policy: str = "",
+        interest_profile: str = "",
+    ) -> int:
         now = time.time()
         duplicate_seq = None
+        duplicate_update = None
         with self._state_lock:
             for url, recent in list(self._recent_urls.items()):
                 if now - recent["time"] > RECENT_DUPLICATE_WINDOW_SECONDS:
@@ -191,14 +273,39 @@ class ClipboardMonitor:
             if recent and now - recent["time"] <= RECENT_DUPLICATE_WINDOW_SECONDS:
                 duplicate_seq = recent["seq"]
                 item = self._items.get(duplicate_seq)
-                if item and is_violation and not item.get("violation_requested"):
-                    self._pending_violation = item
+                if item:
+                    if policy:
+                        item["policy"] = policy
+                    if interest_profile:
+                        item["interest_profile"] = interest_profile
+                    if policy or interest_profile:
+                        duplicate_update = {
+                            "record_id": item.get("record_id", ""),
+                            "policy": item.get("policy", ""),
+                            "interest_profile": item.get("interest_profile", ""),
+                        }
+                    if is_violation and not item.get("violation_requested"):
+                        self._pending_violation = item
 
         if duplicate_seq is not None:
             if is_violation:
                 print(f"\n#{duplicate_seq} ✅ 收到同一链接的违规直传，正在升级为“违规”")
                 self._mark_pending_violation()
-            else:
+            if duplicate_update and duplicate_update.get("record_id"):
+                self._async_update_labels(
+                    duplicate_update["record_id"],
+                    duplicate_seq,
+                    policy=duplicate_update.get("policy", ""),
+                    interest_profile=duplicate_update.get("interest_profile", ""),
+                )
+            elif policy or interest_profile:
+                labels = []
+                if policy:
+                    labels.append(f"policy={policy}")
+                if interest_profile:
+                    labels.append(f"兴趣画像={interest_profile}")
+                print(f"\n#{duplicate_seq} ✅ 已收到补充标注：{', '.join(labels)}")
+            elif not is_violation:
                 print(f"\n#{duplicate_seq} 已收到同一链接，跳过重复写入")
             return duplicate_seq
 
@@ -212,6 +319,8 @@ class ClipboardMonitor:
                 "video_id": parsed["video_id"],
                 "deadline": time.time() + VIOLATION_MARK_WINDOW_SECONDS,
                 "violation_requested": is_violation,
+                "policy": policy,
+                "interest_profile": interest_profile,
                 "status": "queued",
             }
             self._items[seq] = item
@@ -222,6 +331,10 @@ class ClipboardMonitor:
         print(f"#{seq} 视频ID: {parsed['video_id'] or '未知'}")
         print(f"#{seq} 链接: {parsed['normalized_url']}")
         print(f"#{seq} 判定: {'违规' if is_violation else '不违规'}")
+        if policy:
+            print(f"#{seq} policy: {policy}")
+        if interest_profile:
+            print(f"#{seq} 兴趣画像: {interest_profile}")
         print(f"#{seq} 来源: {capture_source}")
         append_capture_log({
             "seq": seq,
@@ -230,6 +343,8 @@ class ClipboardMonitor:
             "video_id": parsed["video_id"],
             "platform": parsed.get("platform"),
             "is_violation": is_violation,
+            "policy": policy,
+            "interest_profile": interest_profile,
             "capture_source": capture_source,
             "task_name": self.task_name,
             "source_label": self.source_label,
@@ -253,6 +368,8 @@ class ClipboardMonitor:
                     continue
                 item["status"] = "writing"
                 write_as_violation = bool(item.get("violation_requested"))
+                write_policy = item.get("policy", "")
+                write_interest_profile = item.get("interest_profile", "")
             try:
                 result = None
                 for attempt in range(1, WRITE_MAX_RETRIES + 1):
@@ -262,6 +379,8 @@ class ClipboardMonitor:
                         is_violation=write_as_violation,
                         task_name=self.task_name,
                         source_label=self.source_label,
+                        policy=write_policy,
+                        interest_profile=write_interest_profile,
                         cache_on_fail=(attempt == WRITE_MAX_RETRIES),
                     )
                     if result.get("action") != "failed_cached":
@@ -284,17 +403,37 @@ class ClipboardMonitor:
                             "url": item["url"],
                             "seq": seq,
                             "created_at": time.time(),
+                            "policy": item.get("policy", ""),
+                            "interest_profile": item.get("interest_profile", ""),
                         }
                         if self._pending_violation and self._pending_violation.get("seq") == seq:
                             self._pending_violation["record_id"] = record_id
                         update_after_write = bool(item.get("violation_requested")) and not write_as_violation
+                        labels_after_write = {
+                            "policy": item.get("policy", ""),
+                            "interest_profile": item.get("interest_profile", ""),
+                        }
                     if update_after_write:
                         mark_result = self.manager.mark_record_violation(record_id)
                         if mark_result.get("action") == "updated":
                             print(f"#{seq} ✅ 已写入：违规")
                         else:
                             print(f"\n#{seq} 修正失败: {mark_result.get('error')}")
-                    else:
+                    late_label_update = (
+                        record_id
+                        and (
+                            labels_after_write.get("policy") != write_policy
+                            or labels_after_write.get("interest_profile") != write_interest_profile
+                        )
+                    )
+                    if late_label_update:
+                        self._async_update_labels(
+                            record_id,
+                            seq,
+                            policy=labels_after_write.get("policy", ""),
+                            interest_profile=labels_after_write.get("interest_profile", ""),
+                        )
+                    if not update_after_write:
                         self._print_result(result, seq)
                 else:
                     self._print_result(result, seq)
@@ -306,6 +445,148 @@ class ClipboardMonitor:
                     item["status"] = "failed"
             finally:
                 self._record_queue.task_done()
+
+    def _async_update_labels(
+        self,
+        record_id: str,
+        seq,
+        policy: str = "",
+        interest_profile: str = "",
+    ):
+        def _run():
+            result = self.manager.update_record_labels(
+                record_id,
+                policy=policy,
+                interest_profile=interest_profile,
+            )
+            if result.get("action") == "updated":
+                labels = []
+                if policy:
+                    labels.append(f"policy={policy}")
+                if interest_profile:
+                    labels.append(f"兴趣画像={interest_profile}")
+                print(f"#{seq} ✅ 已更新标注：{', '.join(labels)}")
+            elif result.get("action") != "skipped":
+                print(f"\n#{seq} 标注更新失败: {result.get('error')}")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _pick_metadata_target_locked(self):
+        now = time.time()
+        pending = self._pending_violation
+        if pending and now <= pending.get("deadline", 0):
+            return pending
+        if self._last_record and now - self._last_record.get("created_at", 0) <= METADATA_MARK_WINDOW_SECONDS:
+            return self._last_record
+        return None
+
+    def _mark_pending_metadata(self, policy: str = "", interest_profile: str = ""):
+        policy = normalize_policy(policy)
+        interest_profile = normalize_interest_profile(interest_profile)
+        with self._state_lock:
+            target = self._pick_metadata_target_locked()
+            if not target:
+                print("\n⚠️ 没有可标注的最近链接：请先复制视频链接，再按标注快捷键。")
+                return
+            if policy:
+                target["policy"] = policy
+            if interest_profile:
+                target["interest_profile"] = interest_profile
+            record_id = target.get("record_id", "")
+            seq = target.get("seq", "?")
+            status = target.get("status")
+
+        labels = []
+        if policy:
+            labels.append(f"policy={policy}")
+        if interest_profile:
+            labels.append(f"兴趣画像={interest_profile}")
+
+        if not record_id:
+            print(f"\n#{seq} ✅ 已收到标注：{', '.join(labels)}，将随该链接一起写入")
+            return
+        if status and status != "done":
+            print(f"\n#{seq} ✅ 已收到标注：{', '.join(labels)}，等待写入完成后补写")
+            return
+        self._async_update_labels(
+            record_id,
+            seq,
+            policy=policy,
+            interest_profile=interest_profile,
+        )
+
+    def mark_external(self, is_violation: bool = False, policy: str = "", interest_profile: str = "") -> dict:
+        policy = normalize_policy(policy)
+        interest_profile = normalize_interest_profile(interest_profile)
+        if policy or interest_profile:
+            self._mark_pending_metadata(policy=policy, interest_profile=interest_profile)
+        if is_violation:
+            self._mark_pending_violation()
+        return {
+            "ok": True,
+            "is_violation": is_violation,
+            "policy": policy,
+            "interest_profile": interest_profile,
+        }
+
+    @staticmethod
+    def _panel_html() -> str:
+        return """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>短视频标注面板</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f7f7f5;color:#222}
+main{max-width:520px;margin:0 auto;padding:20px}
+h1{font-size:20px;margin:0 0 16px}
+.group{margin:18px 0}
+.label{font-size:13px;color:#666;margin-bottom:8px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+button{height:54px;border:1px solid #d7d3ca;background:#fff;border-radius:8px;font-size:18px;font-weight:650;color:#222}
+button:active{background:#e9f2ff}
+.danger{background:#fff2f0;border-color:#ffc7bd}
+.status{margin-top:14px;font-size:14px;color:#555;min-height:22px}
+</style>
+</head>
+<body>
+<main>
+<h1>最近一条视频标注</h1>
+<div class="group">
+<div class="label">policy</div>
+<div class="grid">
+<button onclick="mark('policy=EDF')">EDF</button>
+<button onclick="mark('policy=NSA')">NSA</button>
+<button onclick="mark('policy=SSH')">SSH</button>
+<button onclick="mark('policy=HHB')">HHB</button>
+</div>
+</div>
+<div class="group">
+<div class="label">兴趣画像</div>
+<div class="grid">
+<button onclick="mark('interest=符合')">符合</button>
+<button onclick="mark('interest=不符合')">不符合</button>
+</div>
+</div>
+<div class="group">
+<button class="danger" style="width:100%" onclick="mark('violation=1')">标记违规</button>
+</div>
+<div id="status" class="status"></div>
+</main>
+<script>
+async function mark(q){
+  const el=document.getElementById('status');
+  el.textContent='写入中...';
+  try{
+    const r=await fetch('/mark?'+q);
+    const data=await r.json();
+    el.textContent=data.ok?'已发送':'失败：'+(data.error||'unknown');
+  }catch(e){el.textContent='失败：'+e.message}
+}
+</script>
+</body>
+</html>"""
 
     def _mark_pending_violation(self):
         with self._state_lock:
@@ -416,19 +697,66 @@ class ClipboardMonitor:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _send_html(self, status: int, html: str):
+                body = html.encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_GET(self):
                 parsed_url = urlparse(self.path)
-                if parsed_url.path not in ("/record", "/health"):
+                if parsed_url.path not in ("/record", "/health", "/mark", "/panel"):
                     self._send_json(404, {"ok": False, "error": "not found"})
+                    return
+                if parsed_url.path == "/panel":
+                    self._send_html(200, monitor._panel_html())
                     return
                 if parsed_url.path == "/health":
                     self._send_json(200, {"ok": True})
                     return
                 params = parse_qs(parsed_url.query)
+                if parsed_url.path == "/mark":
+                    violation_raw = (params.get("violation") or params.get("is_violation") or ["0"])[0]
+                    is_violation = str(violation_raw).lower() in ("1", "true", "yes", "y", "是", "违规")
+                    policy = normalize_policy((params.get("policy") or params.get("issue") or [""])[0])
+                    interest_profile = normalize_interest_profile(
+                        (
+                            params.get("interest")
+                            or params.get("interest_profile")
+                            or params.get("profile")
+                            or params.get("兴趣画像")
+                            or [""]
+                        )[0]
+                    )
+                    result = monitor.mark_external(
+                        is_violation=is_violation,
+                        policy=policy,
+                        interest_profile=interest_profile,
+                    )
+                    self._send_json(200, result)
+                    return
                 link = (params.get("url") or params.get("link") or [""])[0]
                 violation_raw = (params.get("violation") or params.get("is_violation") or ["0"])[0]
                 is_violation = str(violation_raw).lower() in ("1", "true", "yes", "y", "是", "违规")
-                result = monitor.submit_external_link(link, is_violation, "iphone-http")
+                policy = normalize_policy((params.get("policy") or params.get("issue") or [""])[0])
+                interest_profile = normalize_interest_profile(
+                    (
+                        params.get("interest")
+                        or params.get("interest_profile")
+                        or params.get("profile")
+                        or params.get("兴趣画像")
+                        or [""]
+                    )[0]
+                )
+                result = monitor.submit_external_link(
+                    link,
+                    is_violation,
+                    "iphone-http",
+                    policy=policy,
+                    interest_profile=interest_profile,
+                )
                 self._send_json(200 if result.get("ok") else 400, result)
 
             def do_POST(self):
@@ -443,7 +771,21 @@ class ClipboardMonitor:
                     payload = {}
                 link = payload.get("url") or payload.get("link") or ""
                 is_violation = bool(payload.get("violation") or payload.get("is_violation"))
-                result = monitor.submit_external_link(link, is_violation, "iphone-http")
+                policy = normalize_policy(payload.get("policy") or payload.get("issue") or "")
+                interest_profile = normalize_interest_profile(
+                    payload.get("interest")
+                    or payload.get("interest_profile")
+                    or payload.get("profile")
+                    or payload.get("兴趣画像")
+                    or ""
+                )
+                result = monitor.submit_external_link(
+                    link,
+                    is_violation,
+                    "iphone-http",
+                    policy=policy,
+                    interest_profile=interest_profile,
+                )
                 self._send_json(200 if result.get("ok") else 400, result)
 
             def log_message(self, format, *args):
@@ -487,6 +829,7 @@ def run_monitor(monitor: ClipboardMonitor):
     startup_flush_async(monitor.manager)
     print("【不违规】只复制视频链接（TikTok/YouTube/Instagram/Facebook），自动按不违规写入。")
     print("【违规】先复制视频链接，再点一次悬浮球，自动按违规写入/修正。按 q 退出。")
+    print("【补充标注】终端按 1/2/3/4 选 policy，按 f/n 选兴趣画像；HTTP 可加 policy=NSA&interest=符合。")
     while monitor._running:
         time.sleep(0.2)
     if not monitor._record_queue.empty():
@@ -507,9 +850,14 @@ def main():
     if accounts:
         target_name = accounts[0]["name"]
         config.load_account(target_name)
+        target_type = config.get_env("FEISHU_TARGET_TYPE", "bitable").lower()
         app_token = config.get_env("BITABLE_APP_TOKEN")
         table_id = config.get_env("BITABLE_TABLE_ID")
-        print(f"✅ 已自动加载上次配置「{target_name}」 (Table ID: {table_id})")
+        if target_type == "sheet":
+            sheet_id = config.get_env("SHEET_ID") or config.get_env("SHEET_NAME")
+            print(f"✅ 已自动加载上次配置「{target_name}」 (Sheet: {sheet_id})")
+        else:
+            print(f"✅ 已自动加载上次配置「{target_name}」 (Table ID: {table_id})")
     else:
         while True:
             try:
@@ -544,16 +892,23 @@ def main():
                 print("\n再见！")
                 return
 
-    from feishu_bitable import FeishuBitableClient
     from record_manager import RecordManager
 
     try:
-        bitable_client = FeishuBitableClient()
+        target_type = config.get_env("FEISHU_TARGET_TYPE", "bitable").lower()
+        if target_type == "sheet":
+            from feishu_sheet import FeishuSheetClient
+
+            feishu_client = FeishuSheetClient()
+        else:
+            from feishu_bitable import FeishuBitableClient
+
+            feishu_client = FeishuBitableClient()
     except Exception as e:
-        print(f"初始化飞书多维表格客户端失败: {e}")
+        print(f"初始化飞书写入客户端失败: {e}")
         return
 
-    manager = RecordManager(bitable_client)
+    manager = RecordManager(feishu_client)
     
     # 使用固定或继承的名称，不再繁琐询问
     task_name = "自动记录任务"
